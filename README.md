@@ -1,4 +1,4 @@
-# datastore_dart - Google Cloud Datastore driver for Dart programming language
+[![pub package](https://img.shields.io/pub/v/datastore_dart.svg)](https://pub.dartlang.org/packages/datastore_dart)
 
 `datastore_dart` is a Dart package that provides a high-level API for working
 with [Google Cloud Datastore](https://cloud.google.com/datastore).
