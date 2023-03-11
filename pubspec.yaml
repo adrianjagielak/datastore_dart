@@ -1,5 +1,5 @@
 name: datastore_dart
-version: 1.0.2
+version: 1.1.0
 description: "Google Cloud Datastore driver for Dart. Inspired by mongo_dart."
 repository: https://github.com/adrianjagielak/datastore_dart
 

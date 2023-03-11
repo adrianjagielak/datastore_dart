@@ -1,5 +1,7 @@
 part of datastore_dart;
 
+int maxEntitiesPerQueryResponse = 2000;
+
 class DbCollection {
   DbCollection(
     this.db,
@@ -121,7 +123,7 @@ class DbCollection {
 
     query.limit = 1;
 
-    return (await _find(query: query)).firstOrNull;
+    return (await _find(query: query).toList()).firstOrNull;
   }
 
   /// Returns documents that satisfies the specified query criteria on the
@@ -132,7 +134,7 @@ class DbCollection {
   /// and not specify fields/projection or order if possible, so the cheaper [projects.lookup](https://cloud.google.com/datastore/docs/reference/data/rest/v1/projects/lookup)
   /// API method is used under the hood and not the more expensive [projects.runQuery](https://cloud.google.com/datastore/docs/reference/data/rest/v1/projects/runQuery)
   /// API method.
-  Future<List<Map<String, dynamic>>> find([selector]) async {
+  Stream<Map<String, dynamic>> find([selector]) {
     final datastore_api.Query query;
 
     if (selector is SelectorBuilder) {
@@ -158,7 +160,7 @@ class DbCollection {
   /// and not specify fields/projection or order if possible, so the cheaper [projects.lookup](https://cloud.google.com/datastore/docs/reference/data/rest/v1/projects/lookup)
   /// API method is used under the hood and not the more expensive [projects.runQuery](https://cloud.google.com/datastore/docs/reference/data/rest/v1/projects/runQuery)
   /// API method.
-  Future<List<Map<String, dynamic>>> findMany([selector]) async {
+  Stream<Map<String, dynamic>> findMany([selector]) {
     final datastore_api.Query query;
 
     if (selector is SelectorBuilder) {
@@ -176,14 +178,12 @@ class DbCollection {
     return _find(query: query);
   }
 
-  Future<List<Map<String, dynamic>>> _find({
+  Stream<Map<String, dynamic>> _find({
     required datastore_api.Query query,
-  }) async {
+  }) async* {
     query._insertKind(collectionName);
 
     final api = await db._getApi();
-
-    List<datastore_api.EntityResult> entityResults = [];
 
     // TODO(adrianjagielak): Allow for additional query fields and process
     //  response locally after the lookup.
@@ -212,6 +212,8 @@ class DbCollection {
 //
         );
     if (canRunLookup) {
+      // Run lookup
+
       final List<datastore_api.Key> keys;
 
       if (propertyFilter.value!.keyValue != null) {
@@ -228,7 +230,7 @@ class DbCollection {
         ),
         db.projectId,
       );
-      entityResults = res.found ?? [];
+      List<datastore_api.EntityResult> entityResults = res.found ?? [];
 
       if (query.offset != null && entityResults.length >= query.offset!) {
         entityResults = entityResults.skip(query.offset!).toList();
@@ -236,21 +238,98 @@ class DbCollection {
       if (query.limit != null && entityResults.length >= query.limit!) {
         entityResults = entityResults.take(query.limit!).toList();
       }
-    } else {
-      final res = await api.projects.runQuery(
-        datastore_api.RunQueryRequest(
-          query: query,
-        ),
-        db.projectId,
-      );
-      entityResults = res.batch?.entityResults ?? [];
-    }
 
-    final entities = entityResults
-        .where((e) => e.entity != null)
-        .map((e) => e.entity!)
-        .toList();
-    return entities.map(_jsonFromDatastoreEntity).toList();
+      final entities = entityResults
+          .where((e) => e.entity != null)
+          .map((e) => e.entity!)
+          .toList();
+      for (final entity in entities) {
+        yield _jsonFromDatastoreEntity(entity);
+      }
+    } else {
+      // Run query
+
+      Future<datastore_api.RunQueryResponse> _runQuery(
+        datastore_api.Query query,
+      ) async {
+        return api.projects.runQuery(
+          datastore_api.RunQueryRequest(
+            query: query,
+          ),
+          db.projectId,
+        );
+      }
+
+// region Implementation adapted from gcloud package (gcloud/src/datastore_impl.dart)
+
+      int batchSize = maxEntitiesPerQueryResponse;
+      bool isLast;
+      int? remainingEntities = query.limit;
+
+      do {
+        if (remainingEntities != null && remainingEntities < batchSize) {
+          batchSize = remainingEntities;
+        }
+
+        query.limit = batchSize;
+
+        datastore_api.RunQueryResponse res = await _runQuery(query);
+
+        final returnedEntities = res.batch?.entityResults ?? [];
+
+        // This check is only necessary for the first request/response pair
+        // (if offset was supplied).
+        if (query.offset != null &&
+            query.offset! > 0 &&
+            query.offset != res.batch?.skippedResults) {
+          throw DatastoreDartError(
+              'Server did not skip over the specified ${query.offset} '
+              'entities.');
+        }
+
+        if (remainingEntities != null &&
+            returnedEntities.length > remainingEntities) {
+          throw DatastoreDartError(
+              'Server returned more entities then the limit for the request'
+              '(${query.limit}) was.');
+        }
+
+        // In case a limit was specified, we need to subtraction the number of
+        // entities we already got.
+        // (the checks above guarantee that this subtraction is >= 0).
+        if (remainingEntities != null) {
+          remainingEntities -= returnedEntities.length;
+        }
+
+        final gotAll = remainingEntities != null && remainingEntities == 0;
+        final noMore = res.batch?.moreResults == 'NO_MORE_RESULTS';
+        isLast = gotAll || noMore;
+
+        if (!isLast && res.batch?.endCursor == null) {
+          throw DatastoreDartError(
+              'Server did not supply an end cursor, even though the query '
+              'is not done.');
+        }
+
+        final entities = returnedEntities
+            .where((e) => e.entity != null)
+            .map((e) => e.entity!)
+            .toList();
+        for (final entity in entities) {
+          yield _jsonFromDatastoreEntity(entity);
+        }
+
+        // The offset will be 0 from now on, since the first request will have
+        // skipped over the first `offset` results.
+        query.offset = 0;
+
+        // Furthermore we set the startCursor to the endCursor of the previous
+        // result batch, so we can continue where we left off.
+        query.startCursor = res.batch?.endCursor;
+      } while (!isLast);
+
+// endregion
+    }
   }
 
   /// Removes document from a collection.
@@ -391,7 +470,7 @@ class DbCollection {
 
 // region different selector (two requests, lookup/query and then commit)
 
-    final documents = await _find(query: query);
+    final documents = await _find(query: query).toList();
 
     try {
       final res = await _commit(
@@ -515,7 +594,7 @@ class DbCollection {
   }) async {
     query._insertKind(collectionName);
 
-    final documents = await _find(query: query);
+    final documents = await _find(query: query).toList();
 
     final updatedDocuments = <Map<String, dynamic>>[];
 
@@ -598,5 +677,4 @@ class DbCollection {
 //  * count
 //  * distinct
 //  * drop ( https://cloud.google.com/dataflow/docs/guides/templates/provided-utilities#datastore-bulk-delete-[deprecated] )
-
 }
