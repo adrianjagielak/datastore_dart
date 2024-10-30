@@ -1,6 +1,6 @@
 [![pub package](https://img.shields.io/pub/v/datastore_dart.svg)](https://pub.dartlang.org/packages/datastore_dart)
 
-[`datastore_dart`](https://pub.dev/packages/datastore_dart) is a Dart package that provides a high-level API for working
+[`datastore_dart`](https://pub.dev/packages/datastore_dart) is a work-in-progress Dart package that provides a high-level API for working
 with [Google Cloud Datastore](https://cloud.google.com/datastore).
 It features an API syntax that matches that of the popular [`mongo_dart`](https://pub.dev/packages/mongo_dart) driver.
 
